@@ -1,0 +1,228 @@
+#!/bin/sh
+# fontctl
+# Minimal font manager for Linux.
+#
+# Copyright (c) 2022-2025 Jacob Nilsson
+#
+# https://github.com/jacnils/fontctl
+
+# hardcoded base directories, can however be overriden by exporting these
+FONTCTL_BASEDIR_USER="${FONTCTL_BASEDIR_USER:-$HOME/.config/fontctl}"
+FONTCTL_BASEDIR_GLOBAL="${FONTCTL_BASEDIR_GLOBAL:-/etc/fontctl}"
+FONTCTL_VER="${FONTCTL_VER:-1.3}"
+FONTCTL_GLOBAL_FONT_DIR="${FONTCTL_GLOBAL_FONT_DIR:-/usr/share/fonts/fonts}"
+FONTCTL_USER_FONT_DIR="${FONTCTL_USER_FONT_DIR:-$HOME/.local/share/fonts}"
+
+# wrapper functions to clean up codebase
+die() { stderr "$@"; exit 1; }
+msg() { [ -n "$*" ] && printf "%s\n" "$@"; }
+msg_n() { [ -n "$*" ] && printf "%s" "$@"; }
+stderr() { msg "$@" >&2; }
+is_narg() { echo "$carg" | grep -qE "$copt|--global|--user" && return 1 || return 0; }
+
+# help argument
+ls_args() {
+	msg "fontctl - minimal font manager for POSIX compliant shells."
+        msg "usage: [stdin] fontctl [install FONT] [remove FONT] [list] [enable FONT] [disable FONT] [license] [help] [version] [arg]"
+        msg "--global perform the action as a superuser."
+        msg "--user   perform the action as the current user."
+}
+
+# create base for fontctl
+mk() {
+		# create base directories where font symlinks and configurations for fonts will be placed.
+		[ "$(id -u)" = "0" ] && \
+            mkdir -p $FONTCTL_BASEDIR_GLOBAL/fonts && isroot=true; \
+            mkdir -p "$FONTCTL_BASEDIR_USER/fonts"
+
+        echo "$arg" | grep -q "global" && isglobal=true
+
+		FAIL_NOROOT() {
+            [ -z "$isroot" ] || return
+			die "This action must be used as root."
+		}
+
+	    echo "$arg" | grep -q "global" && FAIL_NOROOT
+}
+
+# function to parse arguments and install fonts
+install_font() {
+    exitcode=0 # exit code
+    [ -z "$2" ] && die "You must specify a font to install."
+
+    # loop through arguments
+    for i in $(seq "$argc"); do
+        carg="$(printf "%s\n" "$@" | sed -n "${i}","${i}"p)"
+        copt=install
+        is_narg || continue
+        [ ! -e "$carg" ] && exitcode=1 && stderr "Font '$carg' does not exist." && continue || arg2="$carg"
+		[ ! -e "$carg" ] && die "Failed to install '$carg': Not a valid font, exiting." || msg "Installing font '$carg'."
+
+        # install the font
+        [ "$isroot" != "true" ] && cp -f "$arg2" "$FONTCTL_BASEDIR_USER/fonts/" && msg "Font '$arg2' installed successfully for $(whoami)." && hi=true && continue
+		[ "$isroot" = "true" ]  && cp -f "$arg2" "$FONTCTL_BASEDIR_GLOBAL/fonts/" && msg "Font '$arg2' installed globally successfully." && hi=true && continue
+    done
+
+    [ "$hi" != "true" ] && die "Font does not exist."
+
+    if [ "$isroot" != "true" ]; then
+        msg "Run fontctl list --user followed by fontctl enable <font> --user to enable the font."
+    else
+        msg "Run fontctl list --global followed by fontctl enable <font> --global to enable the font."
+    fi
+
+     return $exitcode # return the exit code
+}
+
+# function to parse arguments and remove fonts
+rm_font() {
+        exitcode=0 # exit code
+        [ -z "$2" ] && die "You must specify a font to remove."
+
+        for i in $(seq "$argc"); do
+            carg="$(printf "%s\n" "$@" | sed -n "${i}","${i}"p)"
+            copt=remove
+            is_narg || continue
+            [ -z "$arg2" ] && msg "You must specify a font to remove." && exit 1
+
+            # remove globally
+            if [ "$isglobal" = "true" ]; then
+                    selfont="$(find "$FONTCTL_BASEDIR_GLOBAL"/fonts/*"$carg"* -type f 2>/dev/null | head -n 1)" # Head in case there are multiple matches
+                    [ ! -e "$selfont" ] && exitcode=1 && stderr "No fonts matching '$carg' found." && continue
+                    msg "Removing font '$selfont' globally."
+                    hi=true
+                    rm -f "$FONTCTL_BASEDIR_GLOBAL/fonts/$selfont" && msg "Font '$selfont' removed successfully. Run fontctl list to see available fonts."
+            else # for the user
+                    selfont="$(find "$FONTCTL_BASEDIR_USER"/fonts/*"$carg"* -type f 2>/dev/null | head -n 1)" # Head in case there are multiple matches
+                    [ ! -e "$selfont" ] && exitcode=1 && stderr "No fonts matching '$carg' found." && continue
+                    msg "Removing font '$selfont' for $(whoami)"
+                    hi=true
+                    rm -f "$selfont" && msg "Font '$selfont' removed successfully. Run fontctl list to see available fonts."
+            fi
+        done
+
+        [ "$hi" != "true" ] && die "Font does not exist."
+        return $exitcode # return the exit code
+}
+
+# function to parse arguments and enable fonts
+enable_font() {
+        exitcode=0 # exit code
+        [ -z "$2" ] && die "You must specify a font to enable."
+
+        for i in $(seq "$argc"); do
+            carg="$(printf "%s\n" "$@" | sed -n "${i}","${i}"p)"
+            copt=enable
+            is_narg || continue
+
+            if [ "$isglobal" != "true" ]; then # user
+                selfont="$(find "$FONTCTL_BASEDIR_USER"/fonts/*"$carg"* -type f 2>/dev/null | head -n 1)" # Head in case there are multiple matches
+                b_selfont="$(basename "$selfont")"
+                [ ! -e "$selfont" ] && exitcode=1 && stderr "No fonts matching '$carg' found." && continue
+				msg "Enabling font '$b_selfont' for $(whoami)"
+				mkdir -p "$FONTCTL_USER_FONT_DIR/fontctl-fonts"
+				rm -f "$FONTCTL_USER_FONT_DIR/fontctl-fonts/$b_selfont"
+                hi=true
+				[ -e "$FONTCTL_BASEDIR_USER/fonts/$b_selfont" ] && ln -s "$FONTCTL_BASEDIR_USER/fonts/$b_selfont" "$FONTCTL_USER_FONT_DIR/fontctl-fonts/$b_selfont" && msg "Font '$b_selfont' enabled successfully." && continue
+                exit 1
+            else # global
+                selfont="$(find "$FONTCTL_BASEDIR_GLOBAL"/fonts/*"$carg"* -type f 2>/dev/null | head -n 1)" # Head in case there are multiple matches
+                b_selfont="$(basename "$selfont")"
+                [ ! -e "$selfont" ] && stderr "No fonts matching '$carg' found." && exitcode=1 && continue
+				msg "Enabling font '$b_selfont' globally."
+				mkdir -p "$FONTCTL_GLOBAL_FONT_DIR/fontctl-fonts"
+				rm -f "$FONTCTL_GLOBAL_FONT_DIR/fontctl-fonts/$b_selfont"
+                hi=true
+				[ -e "$FONTCTL_BASEDIR_GLOBAL/fonts/$selfont" ] && ln -s "$FONTCTL_BASEDIR_GLOBAL/fonts/$selfont" "$FONTCTL_GLOBAL_FONT_DIR/fontctl-fonts/$b_selfont" && msg "Font '$selfont' enabled successfully." && continue
+                exit 1
+            fi
+        done
+
+        [ "$hi" != "true" ] && die "Font does not exist."
+        return $exitcode # return the exit code
+}
+
+# function to parse arguments and disable fonts
+disable_font() {
+        exitcode=0 # exit code
+        [ -z "$2" ] && die "You must specify a font to disable."
+
+        for i in $(seq "$argc"); do
+            carg="$(printf "%s\n" "$@" | sed -n "${i}","${i}"p)"
+            copt=disable
+            is_narg || continue
+
+            if [ "$isglobal" != "true" ]; then # user
+                selfont="$(find "$FONTCTL_BASEDIR_USER"/fonts/*"$carg"* -type f 2>/dev/null | head -n 1)" # Head in case there are multiple matches
+                b_selfont="$(basename "$selfont")"
+                [ ! -e "$selfont" ] && exitcode=1 && stderr "No fonts matching '$carg' found." && continue
+				msg "Disabling font '$b_selfont' for $(whoami)"
+                hi=true
+				rm -f "$FONTCTL_USER_FONT_DIR/fontctl-fonts/$b_selfont" && msg "Font '$selfont' disabled successfully." && continue
+				exit 1
+            else # global
+                selfont="$(find "$FONTCTL_BASEDIR_GLOBAL"/fonts/*"$carg"* -type f 2>/dev/null | head -n 1)" # Head in case there are multiple matches
+                b_selfont="$(basename "$selfont")"
+                [ ! -e "$selfont" ] && exitcode=1 && stderr "No fonts matching '$carg' found." && continue
+				msg "Disabling font '$b_selfont' globally."
+                hi=true
+				rm -f "$FONTCTL_GLOBAL_FONT_DIR/fontctl-fonts/$b_selfont" && msg "Font '$b_selfont' disabled successfully." && continue
+                exit 1
+            fi
+        done
+
+        [ "$hi" != "true" ] && die "Font does not exist."
+        return $exitcode # return the exit code
+}
+
+# list fonts
+ls_font() {
+		msg "List of all installed fonts:"
+        [ "$isglobal" = "true" ] && basename "$(find "$FONTCTL_BASEDIR_GLOBAL/fonts/" -type f)" || find "$FONTCTL_BASEDIR_USER/fonts/" -type f -printf '\033[0;35m%f\033[0m\n'
+		msg "Use fontctl enable/disable to enable/disable a font. See fontctl help for more information." && return || exit 1
+}
+
+# print version information
+print_ver() {
+        [ -z "$arg3" ] || die "This option does not take a third argument."
+        [ -n "$arg2" ] && die "Invalid argument: '$arg2'"
+        msg "$FONTCTL_VER"
+}
+
+# print license information
+print_license() {
+	[ -z "$arg2" ] && msg "fontctl is open source software, licensed under the MIT license. Copyright (c) 2022-2025 Jacob Nilsson."
+}
+
+# set everything up
+main() {
+    # convenient variables
+    arg="$*"
+    arg1="$1"
+    arg2="$2"
+    arg3="$3"
+
+    mk "$@"
+
+    # arg count, this is used many times so why not set it here
+    argc="$(printf "%s\n" "$@" | grep -c '')"
+
+    case "$arg1" in
+        "install") arg=recognized && install_font  "$@" && exit 0 || exit 1 ;;
+        "remove")  arg=recognized && rm_font       "$@" && exit 0 || exit 1 ;;
+        "enable")  arg=recognized && enable_font   "$@" && exit 0 || exit 1 ;;
+        "disable") arg=recognized && disable_font  "$@" && exit 0 || exit 1 ;;
+        "list")    arg=recognized && ls_font       "$@" && exit 0 || exit 1 ;;
+        "help")    arg=recognized && ls_args       "$@" && exit 0 || exit 1 ;;
+        "version") arg=recognized && print_ver     "$@" && exit 0 || exit 1 ;;
+        "license") arg=recognized && print_license "$@" && exit 0 || exit 1 ;;
+        "")        arg=recognized && ls_args       "$@" && exit 0 || exit 1 ;;
+    esac
+
+    [ "$arg" != "recognized" ] && msg "Invalid argument: '$arg1'" && die "Run fontctl help or with no arguments for help."
+}
+
+# take stdin
+[ -p /proc/self/fd/0 ] && read stdin && set -- "$@" $stdin
+
+main "$@"
